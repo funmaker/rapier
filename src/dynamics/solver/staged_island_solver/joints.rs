@@ -14,7 +14,17 @@ use crate::dynamics::{
 };
 use parry::math::SIMD_WIDTH;
 
-use super::{GroupJointRanges, JOINT_BATCH, LAYOUT_REF_WORKERS, StagedIslandSolver};
+use super::{GroupJointRanges, StagedIslandSolver};
+
+/// Minimum number of joints in a color for it to be solved as SIMD chunk.
+///
+/// With the `parallel` feature, it's calibrated for LAYOUT_REF_WORKERS, NOT the pool size (see that
+/// constant's docs). Without it there's a single worker, so any color filling a SIMD chunk is worth
+/// packing.
+#[cfg(feature = "parallel")]
+const MIN_COLOR_JOINTS: usize = super::JOINT_BATCH * super::LAYOUT_REF_WORKERS / 2;
+#[cfg(not(feature = "parallel"))]
+const MIN_COLOR_JOINTS: usize = SIMD_WIDTH;
 
 impl StagedIslandSolver {
     /// Staged joint init: joints are colored (same-color = body-disjoint); within each parallel
@@ -118,9 +128,7 @@ impl StagedIslandSolver {
             self.joint_chunk_rows.clear();
             self.joint_overflow_scratch.clear();
             self.staged_group_joint_layout.clear();
-
-            // Calibrated for LAYOUT_REF_WORKERS, NOT the pool size (see that constant's docs).
-            let min_color_joints = JOINT_BATCH * LAYOUT_REF_WORKERS / 2;
+            
             let num_groups = self.groups.len();
 
             // Slot -> group-index table; a joint's group is the max group index over its awake
@@ -165,7 +173,7 @@ impl StagedIslandSolver {
                         continue;
                     }
                     // Color 128 is the "couldn't color" bucket: always serial.
-                    if color_bit < 128 && subset.len() >= min_color_joints {
+                    if color_bit < 128 && subset.len() >= MIN_COLOR_JOINTS {
                         parallel_by_group[gi].push((color_bit, subset.clone()));
                     } else {
                         scalar_by_group[gi].extend_from_slice(subset);
@@ -336,9 +344,6 @@ impl StagedIslandSolver {
         self.joint_chunk_rows.clear();
         self.joint_overflow_scratch.clear();
 
-        // Calibrated for LAYOUT_REF_WORKERS, NOT the pool size (see that constant's docs).
-        let min_color_joints = JOINT_BATCH * LAYOUT_REF_WORKERS / 2;
-
         // Pass 1 (SIMD): parallel colors -> SIMD chunk lanes, cut at row-signature boundaries
         // (stable sort keeps in-color order deterministic); ineligible joints fall back to the
         // scalar overflow. Without SIMD, parallel colors keep per-color ranges of scalar
@@ -348,7 +353,7 @@ impl StagedIslandSolver {
             let color = self.joint_colors.group(color_id);
             let color_bit = self.joint_colors.group_color(color_id);
             // Color 128 is the "couldn't color" bucket: always serial overflow.
-            let parallel = color_bit < 128 && color.len() >= min_color_joints;
+            let parallel = color_bit < 128 && color.len() >= MIN_COLOR_JOINTS;
             if !parallel {
                 self.joint_overflow_scratch.extend_from_slice(color);
                 continue;
